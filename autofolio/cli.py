@@ -114,6 +114,7 @@ def main(
         )
         sys.exit(1)
 
+    config_file = Path(config_path).resolve()
     project = load_project_config(config_path)
     console.print(f"[bold]Project:[/bold] {project.title}")
     console.print(f"[dim]{project.description}[/dim]")
@@ -138,6 +139,7 @@ def main(
             provider=provider,
             skip_build=skip_build,
             is_remote=is_remote,
+            config_file=config_file,
         )
     except Exception as e:
         console.print(f"[bold red]Error: {e}[/bold red]")
@@ -157,6 +159,7 @@ def _run_pipeline(
     provider: str | None,
     skip_build: bool,
     is_remote: bool,
+    config_file: Path | None = None,
 ) -> None:
     console.print("\n[bold]Step 1: Detecting stack...[/bold]")
     detection = detect_stack(repo_path)
@@ -247,8 +250,10 @@ def _run_pipeline(
         if remote_url:
             console.print(f"  Detected GitHub remote: [cyan]{remote_url}[/cyan]")
 
+    pushed = False
     if remote_url:
         push_branch(repo_path, branch_name)
+        pushed = True
         if skip_pr:
             console.print(
                 f"[dim]Skipping PR creation (--no-pr). "
@@ -267,7 +272,22 @@ def _run_pipeline(
         llm, project, analysis, generation, resume_path, dry_run=False
     )
 
+    if pushed and config_file and config_file.exists():
+        _cleanup_config(config_file)
+
     console.print("\n[bold green]Done.[/bold green]")
+
+
+def _cleanup_config(config_file: Path) -> None:
+    try:
+        config_file.unlink()
+        console.print(
+            f"[dim]Cleaned up config file: {config_file.name}[/dim]"
+        )
+    except OSError as e:
+        console.print(
+            f"[yellow]Could not remove config file {config_file.name}: {e}[/yellow]"
+        )
 
 
 def _handle_resume(
