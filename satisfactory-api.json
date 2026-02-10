@@ -1,8 +1,0 @@
-{
-  "title": "Satisfactory Game Data API",
-  "description": "A REST API built with FastAPI that parses Satisfactory game descriptor files and serves structured data for items, recipes, buildings, miners, belts, transportation systems, and resource nodes. Includes filtering, search, production calculation endpoints, and auto-generated interactive Swagger/ReDoc documentation. Designed for factory planners, calculators, and automation scripts.",
-  "repo_url": "https://github.com/aringadre76/satisfactory-api",
-  "demo_url": "",
-  "tech_stack": ["Python", "FastAPI", "Uvicorn", "REST API", "JSON"],
-  "tags": ["api", "game-data", "satisfactory", "rest", "backend"]
-}
