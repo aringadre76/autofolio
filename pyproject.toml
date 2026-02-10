@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autofolio"
+version = "0.1.0"
+description = "Automatically add projects to your portfolio site using LLM-powered analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-ollama>=0.3.0",
+    "pydantic>=2.0",
+    "click>=8.1",
+    "rich>=13.0",
+    "GitPython>=3.1",
+    "PyGithub>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+autofolio = "autofolio.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["autofolio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
