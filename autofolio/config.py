@@ -61,6 +61,18 @@ class GenerationResponse(BaseModel):
     resume_snippet: str | None = None
 
 
+class ProfileReadmeHint(BaseModel):
+    section_heading: str
+    section_start_line: int
+    section_end_line: int
+    format: Literal[
+        "table", "bullet_list", "badge_grid",
+        "html_cards", "heading_blocks", "plain"
+    ]
+    sample_entry: str
+    entry_positions: list[int]
+
+
 LLM_PROVIDER = Literal["ollama", "openai"]
 
 DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"

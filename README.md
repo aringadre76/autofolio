@@ -4,11 +4,12 @@ Automatically add projects to your portfolio website using LLM-powered analysis.
 
 ## How It Works
 
-1. You provide a JSON file describing your project (title, description, tech stack, etc.)
-2. AutoFolio scans your portfolio repo and detects the framework (Next.js, React/Vite, Hugo, Jekyll, Astro, static HTML)
-3. An LLM analyzes the repo structure, decides where and how to add your project
-4. AutoFolio generates the content and shows you a diff preview
-5. If you approve, it applies the changes, verifies the build, pushes a branch, and opens a PR
+1. Point AutoFolio at a project (repo URL, description, or interactive Q&A)
+2. AutoFolio extracts structured metadata (title, description, tech stack, tags)
+3. It scans your portfolio repo and detects the framework (Next.js, React/Vite, Hugo, Jekyll, Astro, static HTML)
+4. An LLM analyzes the repo structure, decides where and how to add your project
+5. AutoFolio generates the content and shows you a diff preview
+6. If you approve, it applies the changes, verifies the build, pushes a branch, and opens a PR
 
 ## Installation
 
@@ -16,9 +17,98 @@ Automatically add projects to your portfolio website using LLM-powered analysis.
 pip install -e ".[dev]"
 ```
 
+You can also run AutoFolio as a module:
+
+```bash
+python3 -m autofolio
+```
+
 ## Quick Start
 
-### 1. Create a project config file
+### The fast way: `autofolio add`
+
+Pass a GitHub repo URL and your portfolio path. AutoFolio clones the repo, reads the README and dependencies, and builds a project config automatically:
+
+```bash
+autofolio add https://github.com/user/smart-thermostat \
+  --portfolio-path ~/my-portfolio
+```
+
+Review the diff preview, then apply:
+
+```bash
+autofolio add https://github.com/user/smart-thermostat \
+  --portfolio-path ~/my-portfolio --apply
+```
+
+### The manual way: `autofolio run`
+
+If you already have a JSON config file:
+
+```bash
+autofolio run --config project.json --portfolio-path ~/my-portfolio
+```
+
+Apply changes after reviewing the preview:
+
+```bash
+autofolio run --config project.json --portfolio-path ~/my-portfolio --apply
+```
+
+## Subcommands
+
+AutoFolio has two subcommands: `add` (smart ingest) and `run` (config-file based).
+
+### `autofolio add`
+
+Smart project ingest with three modes:
+
+**1. Repo URL** (recommended): Give AutoFolio a GitHub URL and it extracts everything automatically from the README, package manifests, and GitHub API metadata.
+
+```bash
+autofolio add https://github.com/user/my-project \
+  --portfolio-path ~/my-portfolio
+```
+
+You can combine a repo URL with a description for extra context:
+
+```bash
+autofolio add https://github.com/user/my-project \
+  --describe "A real-time dashboard for IoT sensor data" \
+  --portfolio-path ~/my-portfolio
+```
+
+**2. `--describe`**: Provide a natural-language description instead of a repo URL. The LLM extracts structured fields from your description.
+
+```bash
+autofolio add --describe "Built a React + Firebase app that tracks gym workouts \
+  with real-time sync. Deployed on Vercel." \
+  --portfolio-path ~/my-portfolio
+```
+
+**3. `--interactive`**: Enter a conversational prompt mode where AutoFolio asks you questions one at a time and builds the config from your answers.
+
+```bash
+autofolio add --interactive --portfolio-path ~/my-portfolio
+```
+
+After ingest, you review and confirm the extracted config before AutoFolio runs the full pipeline (detect, analyze, generate, preview/apply).
+
+Additional `add` options:
+
+```
+--save-config PATH    Save the extracted config to a JSON file
+```
+
+### `autofolio run`
+
+Run the pipeline from a pre-built JSON config file:
+
+```bash
+autofolio run --config project.json --portfolio-path ~/my-portfolio
+```
+
+Example config file:
 
 ```json
 {
@@ -31,31 +121,22 @@ pip install -e ".[dev]"
 }
 ```
 
-### 2. Run AutoFolio (dry-run by default)
+### Shared Options
 
-```bash
-autofolio --config project.json --portfolio-path /path/to/portfolio
-```
-
-### 3. Review the preview, then apply
-
-```bash
-autofolio --config project.json --portfolio-path /path/to/portfolio --apply
-```
-
-## Usage
+Both `add` and `run` accept these options:
 
 ```
-autofolio --config <project.json> [OPTIONS]
-
-Options:
-  --portfolio-path PATH   Local path to the portfolio repo
-  --portfolio-url URL     GitHub URL of the portfolio repo
-  --apply                 Apply changes (default is dry-run)
-  --no-pr                 Skip automatic PR creation
-  --resume-path PATH      Path to a LaTeX resume file (for style matching)
-  --provider [ollama|openai]  LLM provider (default: ollama)
-  --skip-build            Skip build verification
+--portfolio-path PATH           Local path to the portfolio repo
+--portfolio-url URL             GitHub URL of the portfolio repo (cloned to a temp dir)
+--apply                         Apply changes (default is dry-run)
+--no-pr                         Skip automatic PR creation
+--resume-path PATH              Path to a resume file for style matching
+--provider [ollama|openai]      LLM provider (default: ollama)
+--skip-build                    Skip build verification step
+--profile-readme-url URL        GitHub URL to the profile README repo
+--profile-readme-path PATH      Local path to the profile README repo
+--no-profile                    Skip profile README update
+--update-skills                 Also update the skills/badges section if new tech is detected
 ```
 
 ## LLM Providers
@@ -81,13 +162,15 @@ Options:
 **Local path**: Works directly in the directory. If a GitHub remote is detected, AutoFolio automatically pushes the branch and opens a PR.
 
 ```bash
-autofolio --config project.json --portfolio-path ~/my-portfolio --apply
+autofolio add https://github.com/user/my-project \
+  --portfolio-path ~/my-portfolio --apply
 ```
 
 **GitHub URL**: Clones into a temp directory, pushes a branch back, and opens a PR.
 
 ```bash
-autofolio --config project.json --portfolio-url https://github.com/user/portfolio --apply
+autofolio add https://github.com/user/my-project \
+  --portfolio-url https://github.com/user/portfolio --apply
 ```
 
 To push the branch without opening a PR, pass `--no-pr`.
@@ -96,7 +179,7 @@ To push the branch without opening a PR, pass `--no-pr`.
 
 If the LLM determines your project is resume-worthy, AutoFolio generates a resume snippet.
 
-- With `--resume-path`: reads your LaTeX resume and matches its style
+- With `--resume-path`: reads your resume and matches its style
 - Without: generates a plain-text bullet point
 
 Snippets are saved to `~/.autofolio/resume_snippets.md`.
@@ -113,15 +196,20 @@ pytest
 autofolio/
   autofolio/
     __init__.py
+    __main__.py     - Enables python -m autofolio
     cli.py          - CLI entry point (Click)
     config.py       - Pydantic models and config loading
+    ingest.py       - Smart project ingest (repo, describe, interactive)
     detector.py     - Stack/framework detection
     llm.py          - Two-step LLM pipeline (analysis + generation)
+    profile.py      - GitHub profile README updates
     patcher.py      - Patch preview and application
     validator.py    - Build verification
     git_ops.py      - Git branch, commit, push, PR operations
   tests/
     test_detector.py
+    test_ingest.py
+    test_profile.py
     test_patcher.py
     test_validator.py
   pyproject.toml
