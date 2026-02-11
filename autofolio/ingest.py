@@ -15,6 +15,7 @@ from rich.table import Table
 
 from autofolio.config import ProjectConfig
 from autofolio.git_ops import cleanup_temp, clone_repo
+from autofolio.llm import invoke_with_retry
 
 console = Console()
 
@@ -164,12 +165,47 @@ def _read_dependency_info(repo_path: Path) -> str:
         elif dep_file == "pyproject.toml":
             content = _read_file_safe(p, max_chars=2000)
             if content:
-                dep_section = re.findall(
-                    r'"([^"]+)"', content
-                )
-                if dep_section:
+                deps = []
+                in_deps_section = False
+                in_deps_list = False
+                for line in content.splitlines():
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith("#"):
+                        if in_deps_list:
+                            matches = re.findall(r'"([^"]+)"', line)
+                            deps.extend(matches)
+                            if "]" in line:
+                                in_deps_list = False
+                        continue
+                    if re.match(r'^\[.*dependencies', line_stripped, re.IGNORECASE):
+                        in_deps_section = True
+                        in_deps_list = False
+                        continue
+                    if line_stripped.startswith("[") and not re.search(r'dependencies', line_stripped, re.IGNORECASE):
+                        in_deps_section = False
+                        in_deps_list = False
+                        continue
+                    if re.search(r'dependencies\s*=\s*\[', line_stripped, re.IGNORECASE):
+                        in_deps_list = True
+                        matches = re.findall(r'"([^"]+)"', line_stripped)
+                        deps.extend(matches)
+                        if "]" in line_stripped:
+                            in_deps_list = False
+                        continue
+                    if in_deps_list:
+                        matches = re.findall(r'"([^"]+)"', line_stripped)
+                        deps.extend(matches)
+                        if "]" in line_stripped:
+                            in_deps_list = False
+                    elif in_deps_section:
+                        key_match = re.match(r'^([a-zA-Z0-9_-]+)\s*=', line_stripped)
+                        if key_match:
+                            pkg_name = key_match.group(1)
+                            if pkg_name not in ["python", "version"]:
+                                deps.append(pkg_name)
+                if deps:
                     parts.append(
-                        f"pyproject.toml references: {', '.join(dep_section[:20])}"
+                        f"pyproject.toml dependencies: {', '.join(deps[:20])}"
                     )
         else:
             content = _read_file_safe(p, max_chars=1500)
@@ -244,11 +280,11 @@ def ingest_from_repo(
     local_path: Path | None = None
 
     if is_url:
-        console.print("[dim]Fetching GitHub metadata...[/dim]")
-        github_meta = fetch_github_metadata(repo_url_or_path)
+        with console.status("Fetching GitHub metadata...", spinner="dots"):
+            github_meta = fetch_github_metadata(repo_url_or_path)
 
-        console.print("[dim]Cloning repo to read files...[/dim]")
-        temp_dir = clone_repo(repo_url_or_path)
+        with console.status("Cloning repo to read files...", spinner="dots"):
+            temp_dir = clone_repo(repo_url_or_path)
         local_path = temp_dir
     else:
         local_path = Path(repo_url_or_path).resolve()
@@ -266,12 +302,13 @@ def ingest_from_repo(
             user_description=extra_description,
         )
 
-        console.print("[dim]Extracting project metadata with LLM...[/dim]")
-        structured_llm = llm.with_structured_output(ProjectConfig)
-        config = structured_llm.invoke([
-            SystemMessage(content=INGEST_SYSTEM_PROMPT),
-            HumanMessage(content=context),
-        ])
+        with console.status("Extracting project metadata with LLM...", spinner="dots"):
+            structured_llm = llm.with_structured_output(ProjectConfig)
+            config = invoke_with_retry(
+                structured_llm,
+                [SystemMessage(content=INGEST_SYSTEM_PROMPT), HumanMessage(content=context)],
+                step_name="Project metadata extraction",
+            )
 
         if is_url and not config.repo_url:
             config.repo_url = repo_url_or_path
@@ -298,12 +335,15 @@ def ingest_from_description(
             user_description=text,
         )
 
-    console.print("[dim]Extracting project metadata with LLM...[/dim]")
-    structured_llm = llm.with_structured_output(ProjectConfig)
-    config = structured_llm.invoke([
-        SystemMessage(content=INGEST_SYSTEM_PROMPT),
-        HumanMessage(content=context),
-    ])
+    with console.status("Extracting project metadata with LLM...", spinner="dots"):
+        structured_llm = llm.with_structured_output(ProjectConfig)
+        config = invoke_with_retry(
+            structured_llm,
+            [SystemMessage(content=INGEST_SYSTEM_PROMPT), HumanMessage(content=context)],
+            step_name="Project metadata extraction",
+        )
+    if repo_url and not config.repo_url:
+        config.repo_url = repo_url
     return config
 
 

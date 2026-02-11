@@ -74,6 +74,12 @@ def preview_patches(repo_root: Path, patches: list[PatchAction]) -> None:
         elif patch.action == "insert_after_line":
             marker = patch.insert_after_marker or "(no marker)"
             console.print(f"[green]+ insert after:[/green] {marker}")
+        elif patch.action == "insert_before_line":
+            if patch.target_line is not None:
+                console.print(f"[green]+ insert before line:[/green] {patch.target_line}")
+            else:
+                marker = patch.insert_after_marker or "(no marker)"
+                console.print(f"[green]+ insert before:[/green] {marker}")
 
         lexer = _guess_lexer(target)
         syntax = Syntax(patch.content, lexer, theme="monokai", line_numbers=True)

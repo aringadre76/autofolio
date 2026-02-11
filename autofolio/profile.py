@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
 from autofolio.config import PatchAction, ProfileReadmeHint, ProjectConfig
+from autofolio.llm import invoke_with_retry
 
 console = Console()
 
@@ -508,10 +509,14 @@ def _llm_generate_entry(
     )
 
     try:
-        response = llm.invoke([
-            SystemMessage(content=PROFILE_ENTRY_SYSTEM_PROMPT),
-            HumanMessage(content=user_content),
-        ])
+        response = invoke_with_retry(
+            llm,
+            [
+                SystemMessage(content=PROFILE_ENTRY_SYSTEM_PROMPT),
+                HumanMessage(content=user_content),
+            ],
+            step_name="Profile entry generation",
+        )
         raw = response.content.strip()
         if raw.startswith("```"):
             lines = raw.splitlines()

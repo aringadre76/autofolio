@@ -1,0 +1,33 @@
+[data-testid="config-preview-card"],
+.message-content pre,
+.message-content code {
+  border-left: 3px solid hsl(187 80% 42%);
+}
+
+[data-type="step"],
+[data-step-type] {
+  --step-accent: hsl(187 80% 42%);
+}
+
+.message-content pre,
+.message-content .code-block {
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+button[data-action="primary"],
+[data-testid="action-button"]:first-of-type {
+  background-color: hsl(187 80% 42%);
+  color: white;
+}
+
+button[data-variant="ghost"],
+[data-testid="action-button"]:not(:first-of-type) {
+  background-color: transparent;
+  border: 1px solid hsl(220 10% 26%);
+}
+
+.dark button[data-variant="ghost"],
+.dark [data-testid="action-button"]:not(:first-of-type) {
+  border-color: hsl(220 10% 40%);
+}

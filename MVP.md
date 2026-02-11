@@ -583,7 +583,7 @@ The CLI is converted from a single `@click.command()` to a `@click.group()` with
 | `autofolio run` | Existing behavior. Takes `--config project.json` and runs the pipeline. |
 | `autofolio add` | Smart ingest. Accepts a repo URL, `--describe`, or `--interactive`. Extracts metadata, confirms with the user, then runs the same pipeline. |
 
-Both subcommands share the same portfolio/profile flags via a `shared_pipeline_options` decorator (--portfolio-path, --portfolio-url, --apply, --no-pr, --resume-path, --provider, --skip-build, --profile-readme-url, --profile-readme-path, --no-profile, --update-skills).
+Both subcommands share the same portfolio/profile flags via a `shared_pipeline_options` decorator (--portfolio-path, --portfolio-url, --apply, --pr, --resume-path, --provider, --skip-build, --profile-readme-url, --profile-readme-path, --no-profile, --update-skills).
 
 The entry point in `pyproject.toml` remains `autofolio = "autofolio.cli:main"` since `main` is now the click group.
 
@@ -748,3 +748,41 @@ For `autofolio run`, the flow is unchanged (starts at step 6 with a pre-existing
 | Confirmation | Rich table display with y/n/edit prompt |
 | Config persistence | Optional `--save-config` flag for power users and scripting |
 | Backward compatibility | `autofolio run --config` preserves exact existing behavior |
+
+---
+
+## Phase 4: Chat UI
+
+A ChatGPT-style web interface using [Chainlit](https://chainlit.io) so users can add projects through conversation instead of (or in addition to) the CLI.
+
+### Architecture
+
+- **Entry point**: `autofolio/web/app.py`. Run with `chainlit run autofolio/web/app.py -w`.
+- **Lifecycle**: `@cl.on_chat_start` initializes the LLM and sends ChatSettings (portfolio path/URL, provider, apply mode, skip build). `@cl.on_message` routes input to repo ingest (if GitHub URL detected) or description ingest, then shows extracted config with Approve / Edit / Cancel actions.
+- **Actions**: `approve_config` runs the portfolio pipeline (detect stack, analysis, generation), shows diff preview, then Apply or Discard. `edit_config` uses AskActionMessage and AskUserMessage for field-by-field edits. `apply_patches` creates branch, applies patches, runs build (if enabled), commits, pushes, and creates PR.
+- **Existing code**: All ingest and pipeline logic is reused from `ingest.py`, `llm.py`, `detector.py`, `patcher.py`, `preview.py`, `git_ops.py`. Sync functions are wrapped with `cl.make_async()` so the Chainlit event loop is not blocked.
+
+### File structure
+
+- `autofolio/web/app.py` – Chainlit app (on_chat_start, set_starters, set_chat_profiles, on_message, action callbacks).
+- `.chainlit/config.toml` – Chainlit 2.x config (project root, UI name, description, default_theme, cot, custom_css).
+- `public/theme.json` – Teal/cyan HSL theme (light and dark) aligned with CLI branding.
+- `public/stylesheet.css` – Extra CSS (config cards, steps, code blocks, buttons).
+- `public/avatars/autofolio.png` – Bot avatar.
+
+### UX and theming
+
+- **Theme**: Primary `187 80% 42%` (teal), dark default, Inter font. Both light and dark variants in `public/theme.json`.
+- **Settings**: Portfolio path, portfolio URL, LLM provider (ollama/openai), Apply changes (toggle), Skip build (toggle). Stored in session and applied when running the pipeline.
+- **Starters**: Four suggestion cards (Add from GitHub, Describe a project, Add multiple, Run from config hint).
+- **Steps**: Tool-call steps for "Fetching GitHub metadata", "Cloning and extracting", "Detecting portfolio stack", "Analyzing and generating patches", "Creating branch", "Applying patches", "Build verification", "Committing and pushing".
+
+### Key decisions
+
+| Decision | Answer |
+|----------|--------|
+| Dependency | Chainlit as optional `web` extra; core CLI installable without it |
+| Sync code | `cl.make_async()` for all sync ingest/pipeline calls; no changes to existing modules |
+| Config | Portfolio path, provider, apply mode in ChatSettings sidebar; no auth in v1 |
+| Pipeline scope | Single-project flow in chat; profile README and resume snippets deferred from web UI v1 |
+| COT display | `cot = "tool_call"` so users see step labels without raw prompts |

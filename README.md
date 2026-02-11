@@ -17,6 +17,12 @@ Automatically add projects to your portfolio website using LLM-powered analysis.
 pip install -e ".[dev]"
 ```
 
+For the chat Web UI, install the optional `web` extra:
+
+```bash
+pip install -e ".[web]"
+```
+
 You can also run AutoFolio as a module:
 
 ```bash
@@ -129,7 +135,7 @@ Both `add` and `run` accept these options:
 --portfolio-path PATH           Local path to the portfolio repo
 --portfolio-url URL             GitHub URL of the portfolio repo (cloned to a temp dir)
 --apply                         Apply changes (default is dry-run)
---no-pr                         Skip automatic PR creation
+--pr                            Open a pull request after pushing (default: push only)
 --resume-path PATH              Path to a resume file for style matching
 --provider [ollama|openai]      LLM provider (default: ollama)
 --skip-build                    Skip build verification step
@@ -173,7 +179,7 @@ autofolio add https://github.com/user/my-project \
   --portfolio-url https://github.com/user/portfolio --apply
 ```
 
-To push the branch without opening a PR, pass `--no-pr`.
+To open a pull request after pushing, pass `--pr`.
 
 ## Resume Snippets
 
@@ -190,6 +196,21 @@ Snippets are saved to `~/.autofolio/resume_snippets.md`.
 pytest
 ```
 
+## Web UI
+
+A ChatGPT-style chat interface is available via [Chainlit](https://chainlit.io). Paste a GitHub URL or describe a project in natural language; the assistant extracts metadata, shows a config card for approval, runs the pipeline, and displays a diff preview with Apply or Discard.
+
+You can say where your portfolio is in the same message (e.g. "Add https://github.com/user/project to my portfolio at ~/my-site" or "portfolio at ./portfolio") or reply with just a path or URL when asked. A default can also be set in the settings (gear icon).
+
+Install and run:
+
+```bash
+pip install -e ".[web]"
+chainlit run autofolio/web/app.py -w
+```
+
+Open http://localhost:8000. Optionally use the settings (gear icon) for **Portfolio path**, **Portfolio URL**, **LLM provider**, and **Apply changes** (dry-run by default). Starter suggestions appear on the welcome screen.
+
 ## Project Structure
 
 ```
@@ -203,10 +224,20 @@ autofolio/
     detector.py     - Stack/framework detection
     llm.py          - Two-step LLM pipeline (analysis + generation)
     profile.py      - GitHub profile README updates
-    patcher.py      - Patch preview and application
+    patcher.py      - Patch application
+    preview.py      - Unified diff preview and interactive patch selection
     validator.py    - Build verification
     git_ops.py      - Git branch, commit, push, PR operations
+    web/
+      app.py        - Chainlit chat UI
+  .chainlit/
+    config.toml     - Chainlit server and UI config
+  public/
+    theme.json      - Teal/cyan theme (light and dark)
+    stylesheet.css  - Custom CSS overrides
+    avatars/        - Bot avatar
   tests/
+    test_cli_integration.py
     test_detector.py
     test_ingest.py
     test_profile.py

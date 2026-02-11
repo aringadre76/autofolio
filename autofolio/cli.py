@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -29,7 +30,8 @@ from autofolio.llm import (
     validate_analysis,
     validate_generation,
 )
-from autofolio.patcher import apply_patches, preview_patches
+from autofolio.patcher import apply_patches
+from autofolio.preview import preview_and_confirm, show_patches
 from autofolio.profile import (
     discover_profile_repo,
     extract_github_username,
@@ -41,6 +43,24 @@ console = Console()
 
 RESUME_SNIPPETS_DIR = Path.home() / ".autofolio"
 RESUME_SNIPPETS_FILE = RESUME_SNIPPETS_DIR / "resume_snippets.md"
+
+
+@dataclass
+class _ProjectResult:
+    project: object
+    patches: list
+    profile_patches: list
+    analysis: object
+    generation: object
+    config_file: Path | None = None
+
+
+def _batch_label(titles: list[str]) -> str:
+    if len(titles) == 1:
+        return titles[0]
+    if len(titles) <= 3:
+        return ", ".join(titles)
+    return f"{titles[0]} and {len(titles) - 1} more"
 
 
 def shared_pipeline_options(f):
@@ -65,11 +85,11 @@ def shared_pipeline_options(f):
             help="Apply changes. Without this flag, runs in dry-run mode.",
         ),
         click.option(
-            "--no-pr",
-            "skip_pr",
+            "--pr",
+            "create_pr",
             is_flag=True,
             default=False,
-            help="Skip automatic PR creation even if a GitHub remote is detected.",
+            help="Open a pull request after pushing (default is push only).",
         ),
         click.option(
             "--resume-path",
@@ -113,6 +133,12 @@ def shared_pipeline_options(f):
             default=False,
             help="Also update the skills/badges section if new tech is detected.",
         ),
+        click.option(
+            "--preview/--no-preview",
+            "preview",
+            default=None,
+            help="Interactive diff preview before applying (default: on with --apply).",
+        ),
     ]
     for option in reversed(options):
         f = option(f)
@@ -127,18 +153,19 @@ def main():
 @main.command()
 @click.option(
     "--config",
-    "config_path",
+    "config_paths",
     required=True,
+    multiple=True,
     type=click.Path(exists=True),
-    help="Path to the project JSON config file.",
+    help="Path to a project JSON config file (repeatable for batch mode).",
 )
 @shared_pipeline_options
 def run(
-    config_path: str,
+    config_paths: tuple[str, ...],
     portfolio_path: str | None,
     portfolio_url: str | None,
     do_apply: bool,
-    skip_pr: bool,
+    create_pr: bool,
     resume_path: str | None,
     provider: str | None,
     skip_build: bool,
@@ -146,6 +173,7 @@ def run(
     profile_readme_path: str | None,
     no_profile: bool,
     update_skills: bool,
+    preview: bool | None,
 ) -> None:
     console.print(Panel("[bold]AutoFolio[/bold] - Portfolio Automation", style="cyan"))
 
@@ -161,10 +189,12 @@ def run(
         )
         sys.exit(1)
 
-    config_file = Path(config_path).resolve()
-    project = load_project_config(config_path)
-    console.print(f"[bold]Project:[/bold] {project.title}")
-    console.print(f"[dim]{project.description}[/dim]")
+    projects_with_configs: list[tuple] = []
+    for cp in config_paths:
+        config_file = Path(cp).resolve()
+        project = load_project_config(cp)
+        projects_with_configs.append((project, config_file))
+        console.print(f"[bold]Loaded:[/bold] {project.title}")
 
     is_remote = portfolio_url is not None
     temp_dir: Path | None = None
@@ -178,19 +208,18 @@ def run(
     try:
         _run_pipeline(
             repo_path=repo_path,
-            project=project,
+            projects_with_configs=projects_with_configs,
             portfolio_url=portfolio_url,
             do_apply=do_apply,
-            skip_pr=skip_pr,
+            create_pr=create_pr,
             resume_path=resume_path,
             provider=provider,
             skip_build=skip_build,
-            is_remote=is_remote,
-            config_file=config_file,
             profile_readme_url=profile_readme_url,
             profile_readme_path=profile_readme_path,
             no_profile=no_profile,
             update_skills=update_skills,
+            preview=preview,
         )
     except Exception as e:
         console.print(f"[bold red]Error: {e}[/bold red]")
@@ -201,7 +230,7 @@ def run(
 
 
 @main.command()
-@click.argument("repo", required=False, default=None)
+@click.argument("repos", nargs=-1)
 @click.option(
     "--describe",
     type=str,
@@ -223,14 +252,14 @@ def run(
 )
 @shared_pipeline_options
 def add(
-    repo: str | None,
+    repos: tuple[str, ...],
     describe: str | None,
     interactive: bool,
     save_config: str | None,
     portfolio_path: str | None,
     portfolio_url: str | None,
     do_apply: bool,
-    skip_pr: bool,
+    create_pr: bool,
     resume_path: str | None,
     provider: str | None,
     skip_build: bool,
@@ -238,12 +267,13 @@ def add(
     profile_readme_path: str | None,
     no_profile: bool,
     update_skills: bool,
+    preview: bool | None,
 ) -> None:
     console.print(Panel("[bold]AutoFolio[/bold] - Smart Project Ingest", style="cyan"))
 
-    if not repo and not describe and not interactive:
+    if not repos and not describe and not interactive:
         console.print(
-            "[red]Provide at least one of: a repo URL/path, "
+            "[red]Provide at least one of: repo URLs/paths, "
             "--describe, or --interactive.[/red]"
         )
         sys.exit(1)
@@ -267,27 +297,54 @@ def add(
         ingest_interactive,
         save_config_json,
     )
+    from autofolio.git_ops import slugify
 
     llm = get_llm(provider)
 
+    projects_with_configs: list[tuple] = []
+
     if interactive:
         project = ingest_interactive(llm)
-    elif repo and describe:
-        project = ingest_from_repo(llm, repo, extra_description=describe)
-    elif repo:
-        project = ingest_from_repo(llm, repo)
+        project = confirm_config(project)
+        if project is None:
+            sys.exit(0)
+        if save_config:
+            save_config_json(project, save_config)
+        projects_with_configs.append((project, None))
+    elif repos:
+        for repo_ref in repos:
+            console.print(f"\n[bold]Ingesting:[/bold] {repo_ref}")
+            if describe:
+                project = ingest_from_repo(
+                    llm, repo_ref, extra_description=describe
+                )
+            else:
+                project = ingest_from_repo(llm, repo_ref)
+            project = confirm_config(project)
+            if project is None:
+                console.print(f"[yellow]Skipped: {repo_ref}[/yellow]")
+                continue
+            if save_config:
+                if len(repos) > 1:
+                    base = Path(save_config)
+                    name = slugify(project.title)
+                    save_path = base.parent / f"{base.stem}-{name}{base.suffix}"
+                    save_config_json(project, str(save_path))
+                else:
+                    save_config_json(project, save_config)
+            projects_with_configs.append((project, None))
     else:
         project = ingest_from_description(llm, describe)
+        project = confirm_config(project)
+        if project is None:
+            sys.exit(0)
+        if save_config:
+            save_config_json(project, save_config)
+        projects_with_configs.append((project, None))
 
-    project = confirm_config(project)
-    if project is None:
+    if not projects_with_configs:
+        console.print("[yellow]No projects to process.[/yellow]")
         sys.exit(0)
-
-    if save_config:
-        save_config_json(project, save_config)
-
-    console.print(f"\n[bold]Project:[/bold] {project.title}")
-    console.print(f"[dim]{project.description}[/dim]")
 
     is_remote = portfolio_url is not None
     temp_dir: Path | None = None
@@ -301,19 +358,18 @@ def add(
     try:
         _run_pipeline(
             repo_path=repo_path,
-            project=project,
+            projects_with_configs=projects_with_configs,
             portfolio_url=portfolio_url,
             do_apply=do_apply,
-            skip_pr=skip_pr,
+            create_pr=create_pr,
             resume_path=resume_path,
             provider=provider,
             skip_build=skip_build,
-            is_remote=is_remote,
-            config_file=None,
             profile_readme_url=profile_readme_url,
             profile_readme_path=profile_readme_path,
             no_profile=no_profile,
             update_skills=update_skills,
+            preview=preview,
         )
     except Exception as e:
         console.print(f"[bold red]Error: {e}[/bold red]")
@@ -323,23 +379,80 @@ def add(
             cleanup_temp(temp_dir)
 
 
-def _run_pipeline(
+def _collect_for_project(
     repo_path: Path,
     project,
+    llm,
+    detection,
+) -> _ProjectResult:
+    with console.status("  Analyzing with LLM...", spinner="dots"):
+        analysis = run_analysis(llm, project, detection)
+
+    console.print(f"    Priority: [cyan]{analysis.evaluation.portfolio_priority}[/cyan]")
+    console.print(f"    Resume-worthy: {'yes' if analysis.evaluation.resume_worthy else 'no'}")
+    console.print(f"    Reason: {analysis.evaluation.reason}")
+
+    with console.status("  Validating analysis...", spinner="dots"):
+        analysis = validate_analysis(analysis, detection)
+
+    console.print(f"    Files to read: {analysis.files_to_read}")
+    for action in analysis.plan:
+        console.print(f"    Plan: {action.action} {action.path} -- {action.explain}")
+
+    with console.status("  Generating patches...", spinner="dots"):
+        file_contents = read_requested_files(repo_path, analysis.files_to_read)
+        generation = run_generation(llm, project, analysis, file_contents, detection)
+
+    with console.status("  Validating patches...", spinner="dots"):
+        generation = validate_generation(generation, file_contents, detection)
+
+    console.print(f"    Valid patches: {len(generation.patch)}")
+
+    if not generation.patch:
+        console.print(
+            "[yellow]    Main generation produced no patches. "
+            "Running focused entry generation...[/yellow]"
+        )
+        priority = analysis.evaluation.portfolio_priority
+        with console.status("  Generating focused entry...", spinner="dots"):
+            focused = generate_focused_entry(llm, project, detection, priority)
+        if focused:
+            generation.patch = [focused]
+            console.print("[green]    Focused generation succeeded.[/green]")
+        else:
+            console.print(
+                "[bold red]    No valid patches generated for this project.[/bold red]"
+            )
+
+    return _ProjectResult(
+        project=project,
+        patches=list(generation.patch),
+        profile_patches=[],
+        analysis=analysis,
+        generation=generation,
+    )
+
+
+def _run_pipeline(
+    repo_path: Path,
+    projects_with_configs: list[tuple],
     portfolio_url: str | None,
     do_apply: bool,
-    skip_pr: bool,
+    create_pr: bool,
     resume_path: str | None,
     provider: str | None,
     skip_build: bool,
-    is_remote: bool,
-    config_file: Path | None = None,
     profile_readme_url: str | None = None,
     profile_readme_path: str | None = None,
     no_profile: bool = False,
     update_skills: bool = False,
+    preview: bool | None = None,
 ) -> None:
-    console.print("\n[bold]Step 1: Detecting stack...[/bold]")
+    if preview is None:
+        preview = do_apply
+    is_batch = len(projects_with_configs) > 1
+
+    console.print("\n[bold]Step 1: Detecting portfolio stack...[/bold]")
     detection = detect_stack(repo_path)
     console.print(f"  Stack: [cyan]{detection.stack}[/cyan]")
     console.print(f"  Package manager: [cyan]{detection.package_manager}[/cyan]")
@@ -354,45 +467,47 @@ def _run_pipeline(
             f"({pl.variable_name}, {pl.entry_count} entries)"
         )
 
-    console.print("\n[bold]Step 2: Analyzing portfolio with LLM...[/bold]")
     llm = get_llm(provider)
-    analysis = run_analysis(llm, project, detection)
 
-    console.print(f"  Priority: [cyan]{analysis.evaluation.portfolio_priority}[/cyan]")
-    console.print(f"  Resume-worthy: {'yes' if analysis.evaluation.resume_worthy else 'no'}")
-    console.print(f"  Reason: {analysis.evaluation.reason}")
-
-    console.print("\n  [dim]Validating analysis...[/dim]")
-    analysis = validate_analysis(analysis, detection)
-    console.print(f"  Files to read: {analysis.files_to_read}")
-    for action in analysis.plan:
-        console.print(f"  Plan: {action.action} {action.path} -- {action.explain}")
-
-    console.print("\n[bold]Step 3: Generating patches with LLM...[/bold]")
-    file_contents = read_requested_files(repo_path, analysis.files_to_read)
-    generation = run_generation(llm, project, analysis, file_contents, detection)
-
-    console.print(f"\n  [dim]Validating patches...[/dim]")
-    generation = validate_generation(generation, file_contents, detection)
-    console.print(f"  Valid patches: {len(generation.patch)}")
-
-    if not generation.patch:
+    if is_batch:
         console.print(
-            "[yellow]  Main generation failed. "
-            "Running focused entry generation...[/yellow]"
+            f"\n[bold]Processing {len(projects_with_configs)} projects...[/bold]"
         )
-        priority = analysis.evaluation.portfolio_priority
-        focused = generate_focused_entry(llm, project, detection, priority)
-        if focused:
-            generation.patch = [focused]
-            console.print(f"[green]  Focused generation succeeded.[/green]")
-        else:
-            console.print(
-                "[bold red]No valid patches could be generated.[/bold red]"
-            )
-            return
 
-    profile_patches = []
+    results: list[_ProjectResult] = []
+    for idx, (project, config_file) in enumerate(projects_with_configs, 1):
+        if is_batch:
+            console.print(
+                f"\n[bold cyan]--- [{idx}/{len(projects_with_configs)}] "
+                f"{project.title} ---[/bold cyan]"
+            )
+        else:
+            console.print(f"\n[bold]Project:[/bold] {project.title}")
+            console.print(f"[dim]{project.description}[/dim]")
+
+        try:
+            result = _collect_for_project(repo_path, project, llm, detection)
+        except Exception as exc:
+            if is_batch:
+                console.print(
+                    f"[bold red]  Failed to process {project.title}: "
+                    f"{type(exc).__name__}: {exc}[/bold red]"
+                )
+                console.print(f"[yellow]  Skipping {project.title}, continuing batch...[/yellow]")
+                continue
+            raise
+        result.config_file = config_file
+        results.append(result)
+
+    all_patches: list = []
+    for r in results:
+        all_patches.extend(r.patches)
+
+    if not all_patches:
+        console.print("[bold red]No valid patches from any project.[/bold red]")
+        return
+
+    profile_patches_all: list = []
     profile_repo_path = None
     profile_temp_dir = None
     profile_is_remote = False
@@ -403,51 +518,97 @@ def _run_pipeline(
         )
         if profile_result:
             profile_repo_path, profile_temp_dir, profile_is_remote = profile_result
-            console.print("\n[bold]Profile README step: generating entry...[/bold]")
-            priority = analysis.evaluation.portfolio_priority
-            try:
-                profile_patches = run_profile_step(
-                    llm, project, priority, profile_repo_path, update_skills
-                )
-                if profile_patches:
+            console.print("\n[bold]Profile README step: generating entries...[/bold]")
+            for r in results:
+                if not r.patches:
+                    continue
+                priority = r.analysis.evaluation.portfolio_priority
+                try:
+                    with console.status(
+                        f"  Generating profile patches for {r.project.title}...",
+                        spinner="dots",
+                    ):
+                        pp = run_profile_step(
+                            llm, r.project, priority, profile_repo_path, update_skills
+                        )
+                    if pp:
+                        r.profile_patches = pp
+                        profile_patches_all.extend(pp)
+                        console.print(
+                            f"[green]  {r.project.title}: "
+                            f"{len(pp)} profile patch(es)[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"[dim]  {r.project.title}: no profile patches[/dim]"
+                        )
+                except Exception as e:
                     console.print(
-                        f"[green]  Profile patches ready: "
-                        f"{len(profile_patches)}[/green]"
+                        f"[yellow]  {r.project.title} profile step failed: {e}[/yellow]"
                     )
-                else:
-                    console.print("[dim]  No profile patches generated.[/dim]")
-            except Exception as e:
-                console.print(
-                    f"[yellow]Profile README step failed: {e}[/yellow]"
-                )
-                profile_patches = []
+
+    titles = [r.project.title for r in results if r.patches]
+    branch_label = _batch_label(titles)
 
     if not do_apply:
-        console.print("\n[bold yellow]DRY RUN (pass --apply to write changes)[/bold yellow]")
-        console.print("\n[bold]Portfolio patches:[/bold]")
-        preview_patches(repo_path, generation.patch)
-        if profile_patches and profile_repo_path:
-            console.print("\n[bold]Profile README patches:[/bold]")
-            preview_patches(profile_repo_path, profile_patches)
-        _handle_resume(
-            llm, project, analysis, generation, resume_path, dry_run=True
+        console.print(
+            "\n[bold yellow]DRY RUN (pass --apply to write changes)[/bold yellow]"
         )
+        show_patches(repo_path, all_patches, label="Portfolio patches")
+        if profile_patches_all and profile_repo_path:
+            show_patches(
+                profile_repo_path, profile_patches_all,
+                label="Profile README patches",
+            )
+        for r in results:
+            if not r.patches:
+                continue
+            _handle_resume(
+                llm, r.project, r.analysis, r.generation,
+                resume_path, dry_run=True,
+            )
         if profile_temp_dir:
             cleanup_temp(profile_temp_dir)
         return
 
-    console.print("\n[bold]Step 4: Creating branch...[/bold]")
-    branch_name = create_branch(repo_path, project.title)
+    if preview:
+        all_patches = preview_and_confirm(
+            repo_path, all_patches, label="Portfolio patches"
+        )
+        if not all_patches:
+            console.print("[yellow]No patches to apply. Exiting.[/yellow]")
+            if profile_temp_dir:
+                cleanup_temp(profile_temp_dir)
+            return
 
-    console.print("\n[bold]Step 5: Applying patches...[/bold]")
-    apply_patches(repo_path, generation.patch)
+        approved_ids = {id(p) for p in all_patches}
+        for r in results:
+            r.patches = [p for p in r.patches if id(p) in approved_ids]
+
+        if profile_patches_all and profile_repo_path:
+            profile_patches_all = preview_and_confirm(
+                profile_repo_path, profile_patches_all,
+                label="Profile README patches",
+            )
+            approved_profile_ids = {id(p) for p in profile_patches_all}
+            for r in results:
+                r.profile_patches = [
+                    p for p in r.profile_patches
+                    if id(p) in approved_profile_ids
+                ]
+
+    console.print("\n[bold]Creating branch...[/bold]")
+    branch_name = create_branch(repo_path, branch_label)
+
+    console.print("\n[bold]Applying patches...[/bold]")
+    apply_patches(repo_path, all_patches)
 
     if not skip_build:
-        console.print("\n[bold]Step 6: Build verification...[/bold]")
+        console.print("\n[bold]Build verification...[/bold]")
         try:
             run_build(repo_path, detection.build_commands)
-        except BuildError as e:
-            console.print(f"[bold red]Build failed, reverting changes...[/bold red]")
+        except BuildError:
+            console.print("[bold red]Build failed, reverting changes...[/bold red]")
             from git import Repo as GitRepo
             repo = GitRepo(str(repo_path))
             repo.git.checkout("--", ".")
@@ -457,8 +618,8 @@ def _run_pipeline(
                 cleanup_temp(profile_temp_dir)
             raise
 
-    console.print("\n[bold]Step 7: Committing and pushing...[/bold]")
-    commit_changes(repo_path, project.title)
+    console.print("\n[bold]Committing and pushing...[/bold]")
+    commit_changes(repo_path, branch_label)
 
     remote_url = portfolio_url
     if not remote_url:
@@ -470,13 +631,13 @@ def _run_pipeline(
     if remote_url:
         push_branch(repo_path, branch_name)
         pushed = True
-        if skip_pr:
-            console.print(
-                f"[dim]Skipping PR creation (--no-pr). "
-                f"Branch '{branch_name}' pushed.[/dim]"
-            )
+        if create_pr:
+            create_pull_request(remote_url, branch_name, branch_label, repo_path)
         else:
-            create_pull_request(remote_url, branch_name, project.title, repo_path)
+            console.print(
+                f"[dim]Branch '{branch_name}' pushed. "
+                f"Pass --pr to open a pull request.[/dim]"
+            )
     else:
         console.print(
             f"[dim]No GitHub remote detected. "
@@ -484,14 +645,14 @@ def _run_pipeline(
             f"Push it yourself when ready.[/dim]"
         )
 
-    if profile_patches and profile_repo_path:
+    if profile_patches_all and profile_repo_path:
         try:
             _apply_profile_patches(
                 profile_repo_path=profile_repo_path,
-                profile_patches=profile_patches,
-                project=project,
+                profile_patches=profile_patches_all,
+                label=branch_label,
                 profile_readme_url=profile_readme_url,
-                skip_pr=skip_pr,
+                create_pr=create_pr,
                 profile_is_remote=profile_is_remote,
             )
         except Exception as e:
@@ -507,12 +668,19 @@ def _run_pipeline(
     elif profile_temp_dir:
         cleanup_temp(profile_temp_dir)
 
-    _handle_resume(
-        llm, project, analysis, generation, resume_path, dry_run=False
-    )
+    for r in results:
+        if not r.patches:
+            continue
+        _handle_resume(
+            llm, r.project, r.analysis, r.generation,
+            resume_path, dry_run=False,
+        )
 
-    if pushed and config_file and config_file.exists():
-        _cleanup_config(config_file)
+    for r in results:
+        if not r.patches:
+            continue
+        if pushed and r.config_file and r.config_file.exists():
+            _cleanup_config(r.config_file)
 
     console.print("\n[bold green]Done.[/bold green]")
 
@@ -558,17 +726,18 @@ def _resolve_profile_repo(
 def _apply_profile_patches(
     profile_repo_path: Path,
     profile_patches: list,
-    project,
+    label: str,
     profile_readme_url: str | None,
-    skip_pr: bool,
+    create_pr: bool,
     profile_is_remote: bool,
 ) -> None:
-    console.print("\n[bold]Step 8: Applying profile README patches...[/bold]")
-    branch_name = create_branch(profile_repo_path, f"profile-{project.title}")
+    console.print("\n[bold]Applying profile README patches...[/bold]")
+    branch_name = create_branch(profile_repo_path, f"profile-{label}")
 
     apply_patches(profile_repo_path, profile_patches)
 
-    commit_changes(profile_repo_path, f"profile: {project.title}")
+    commit_label = f"profile: {label}"
+    commit_changes(profile_repo_path, commit_label)
 
     profile_remote = profile_readme_url
     if not profile_remote:
@@ -580,17 +749,17 @@ def _apply_profile_patches(
 
     if profile_remote:
         push_branch(profile_repo_path, branch_name)
-        if skip_pr:
-            console.print(
-                f"[dim]Skipping profile PR creation (--no-pr). "
-                f"Branch '{branch_name}' pushed.[/dim]"
-            )
-        else:
+        if create_pr:
             create_pull_request(
                 profile_remote,
                 branch_name,
-                f"profile: {project.title}",
+                commit_label,
                 profile_repo_path,
+            )
+        else:
+            console.print(
+                f"[dim]Profile branch '{branch_name}' pushed. "
+                f"Pass --pr to open a pull request.[/dim]"
             )
     else:
         console.print(
@@ -630,13 +799,15 @@ def _handle_resume(
         resume_content = None
         if resume_path:
             resume_content = Path(resume_path).read_text(encoding="utf-8")
-        snippet = generate_resume_snippet(llm, project, resume_content)
+        with console.status("  Generating resume snippet...", spinner="dots"):
+            snippet = generate_resume_snippet(llm, project, resume_content)
 
     if resume_path:
         console.print("[dim]Matched to your resume style.[/dim]")
     else:
         console.print(
-            "[dim]Here is a snippet you can add to your resume.[/dim]"
+            "[dim]Here is a snippet you can add to your resume "
+            "(Overleaf, Google Docs, etc.).[/dim]"
         )
 
     console.print(Panel(snippet, title="Resume Snippet", style="green"))

@@ -139,6 +139,21 @@ class TestReadDependencyInfo:
         assert "click" in result
         assert "rich" in result
 
+    def test_reads_pyproject_toml_ignores_non_deps(self, tmp_path: Path):
+        content = '''[project]
+name = "my-awesome-project"
+description = "A cool project"
+dependencies = ["flask", "requests"]
+version = "1.0.0"
+'''
+        (tmp_path / "pyproject.toml").write_text(content)
+        result = _read_dependency_info(tmp_path)
+        assert "flask" in result
+        assert "requests" in result
+        assert "my-awesome-project" not in result
+        assert "A cool project" not in result
+        assert "1.0.0" not in result
+
     def test_no_dep_files(self, tmp_path: Path):
         result = _read_dependency_info(tmp_path)
         assert result == ""

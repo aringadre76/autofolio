@@ -434,10 +434,11 @@ def run_generation(
     )
 
     structured_llm = llm.with_structured_output(GenerationResponse)
-    response = structured_llm.invoke([
-        SystemMessage(content=GENERATION_SYSTEM_PROMPT),
-        HumanMessage(content=user_content),
-    ])
+    response = invoke_with_retry(
+        structured_llm,
+        [SystemMessage(content=GENERATION_SYSTEM_PROMPT), HumanMessage(content=user_content)],
+        step_name="Patch generation",
+    )
     return response
 
 
@@ -532,8 +533,14 @@ def _auto_fix_marker(
     return None
 
 
-def _find_last_entry_closing(content: str, variable_name: str) -> str | None:
+def _array_bracket_start(content: str, variable_name: str) -> int | None:
     import re
+    if variable_name.startswith("(export-default)"):
+        idx = content.find("export default [")
+        return content.index("[", idx) if idx >= 0 else None
+    if variable_name.startswith("(module-exports)"):
+        idx = content.find("module.exports = [")
+        return content.index("[", idx) if idx >= 0 else None
     pattern = re.compile(
         rf"(?:export\s+)?(?:const|let|var)\s+{re.escape(variable_name)}\s*"
         rf"(?::\s*[^=]+)?\s*=\s*\[",
@@ -542,8 +549,14 @@ def _find_last_entry_closing(content: str, variable_name: str) -> str | None:
     match = pattern.search(content)
     if not match:
         return None
+    return content.index("[", match.start())
 
-    bracket_start = content.index("[", match.start())
+
+def _find_last_entry_closing(content: str, variable_name: str) -> str | None:
+    bracket_start = _array_bracket_start(content, variable_name)
+    if bracket_start is None:
+        return None
+
     depth = 0
     last_brace_close_line = None
     i = bracket_start
@@ -649,12 +662,16 @@ def _generate_focused_code_entry(
         f"Do not include any explanation, just the code.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output code snippets only. No explanation. No markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output code snippets only. No explanation. No markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="Code entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -749,12 +766,16 @@ def _generate_focused_html_entry(
         f"Do not include any explanation, just the HTML.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output HTML snippets only. No explanation. No markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output HTML snippets only. No explanation. No markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="HTML entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -855,12 +876,16 @@ def _generate_focused_json_entry(
         f"Do not include any explanation, just the JSON.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output JSON snippets only. No explanation. No markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output JSON snippets only. No explanation. No markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="JSON entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -958,12 +983,16 @@ def _generate_focused_yaml_entry(
         f"Do NOT add any fields not in the sample. No explanation.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output YAML snippets only. No explanation. No markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output YAML snippets only. No explanation. No markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="YAML entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -1033,12 +1062,16 @@ def _generate_focused_generic_data_entry(
         f"Output ONLY the new entry. Match the existing format exactly.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output data snippets only. No explanation. No markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output data snippets only. No explanation. No markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="Data entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -1088,12 +1121,16 @@ def _generate_focused_markdown_entry(
         f"Do not include any explanation, just the markdown.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output Markdown snippets only. No explanation. No markdown code fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output Markdown snippets only. No explanation. No markdown code fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="Markdown entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -1179,12 +1216,16 @@ def _generate_focused_directory_entry(
         f"Output the complete file content only. No explanation.\n"
     )
 
-    response = llm.invoke([
-        SystemMessage(
-            content="You output file content only. No explanation. No wrapping markdown fences."
-        ),
-        HumanMessage(content=prompt),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [
+            SystemMessage(
+                content="You output file content only. No explanation. No wrapping markdown fences."
+            ),
+            HumanMessage(content=prompt),
+        ],
+        step_name="Directory entry generation",
+    )
 
     raw = response.content.strip()
     if raw.startswith("```"):
@@ -1252,17 +1293,10 @@ def _detect_current_indent(lines: list[str]) -> str:
 
 
 def _find_entry_line_numbers(content: str, variable_name: str) -> list[int]:
-    import re
-    pattern = re.compile(
-        rf"(?:export\s+)?(?:const|let|var)\s+{re.escape(variable_name)}\s*"
-        rf"(?::\s*[^=]+)?\s*=\s*\[",
-        re.MULTILINE,
-    )
-    match = pattern.search(content)
-    if not match:
+    bracket_start = _array_bracket_start(content, variable_name)
+    if bracket_start is None:
         return []
 
-    bracket_start = content.index("[", match.start())
     entry_starts: list[int] = []
     depth = 0
     i = bracket_start
@@ -1283,17 +1317,10 @@ def _find_entry_line_numbers(content: str, variable_name: str) -> list[int]:
 
 
 def _find_array_closing(content: str, variable_name: str) -> tuple[str, int] | None:
-    import re
-    pattern = re.compile(
-        rf"(?:export\s+)?(?:const|let|var)\s+{re.escape(variable_name)}\s*"
-        rf"(?::\s*[^=]+)?\s*=\s*\[",
-        re.MULTILINE,
-    )
-    match = pattern.search(content)
-    if not match:
+    bracket_start = _array_bracket_start(content, variable_name)
+    if bracket_start is None:
         return None
 
-    bracket_start = content.index("[", match.start())
     depth = 0
     i = bracket_start
     while i < len(content):
@@ -1339,10 +1366,11 @@ def generate_resume_snippet(
             "suitable for any resume format."
         )
 
-    response = llm.invoke([
-        SystemMessage(content=RESUME_SYSTEM_PROMPT),
-        HumanMessage(content=user_content),
-    ])
+    response = invoke_with_retry(
+        llm,
+        [SystemMessage(content=RESUME_SYSTEM_PROMPT), HumanMessage(content=user_content)],
+        step_name="Resume snippet generation",
+    )
     return response.content
 
 
