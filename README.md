@@ -1,3 +1,5 @@
+**README** | [USAGE](USAGE.md)
+
 # AutoFolio
 
 Automatically add projects to your portfolio website using LLM-powered analysis. AutoFolio adapts to whatever portfolio structure you already have. No refactoring required. Safe, preview-first workflow.
@@ -251,7 +253,8 @@ autofolio/
     test_patcher.py
     test_validator.py
   pyproject.toml
-  README.md
+  README.md        - Overview and quick start
+  USAGE.md         - Detailed usage guide (CLI, Web UI, options)
   MVP.md           - MVP plan and design notes
 ```
 
