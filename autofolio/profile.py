@@ -931,6 +931,34 @@ def detect_duplicate(content: str, project: ProjectConfig) -> bool:
     return False
 
 
+def _listing_content_from_default_branch(repo_path: Path, relative_path: str) -> str | None:
+    if not (repo_path / ".git").is_dir():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        ref = result.stdout.strip()
+        show = subprocess.run(
+            ["git", "show", f"{ref}:{relative_path}"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if show.returncode != 0:
+            return None
+        return show.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def project_already_in_portfolio(
     repo_path: Path, project: ProjectConfig, detection: DetectionResult
 ) -> bool:
@@ -938,12 +966,14 @@ def project_already_in_portfolio(
     if not pl:
         return False
     path = repo_path / pl.file_path
-    if not path.is_file():
-        return False
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return False
+    content = _listing_content_from_default_branch(repo_path, pl.file_path)
+    if content is None:
+        if not path.is_file():
+            return False
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
     return detect_duplicate(content, project)
 
 

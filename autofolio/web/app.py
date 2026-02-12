@@ -106,6 +106,55 @@ def _parse_portfolio_from_message(text: str) -> tuple[str, str, str]:
     return cleaned, portfolio_path, portfolio_url
 
 
+def _parse_update_profile_intent(text: str) -> bool:
+    t = text.lower().strip()
+    if not t:
+        return False
+    profile_phrases = [
+        "profile readme",
+        "github profile",
+        "also profile",
+        "and profile",
+        "and my profile",
+        " + profile",
+        "both",
+        "portfolio and profile",
+        "profile and portfolio",
+        "update my profile",
+        "update profile",
+        "add to my profile",
+        "add to profile",
+    ]
+    for phrase in profile_phrases:
+        if phrase in t:
+            return True
+    if re.search(r"\b(?:also|and)\s+.*\bprofile\b", t):
+        return True
+    if re.search(r"\bprofile\b.*\b(?:also|and)\b", t):
+        return True
+    return False
+
+
+def _is_profile_only_intent(text: str, cleaned: str) -> bool:
+    if GITHUB_URL_RE.search(text):
+        return False
+    if not _parse_update_profile_intent(text):
+        return False
+    t = cleaned.strip().lower()
+    if not t:
+        return True
+    project_indicators = [
+        "i built", "i have", "i made", "project that", "app that",
+        " uses ", "react", "vue", "python", "node", "http", "deployed",
+        "repository", " repo ", "github.com/",
+    ]
+    if any(ind in t for ind in project_indicators):
+        return False
+    if len(t) > 80:
+        return False
+    return True
+
+
 def _config_to_markdown(config: ProjectConfig) -> str:
     lines = [
         "**Extracted project**",
@@ -185,7 +234,6 @@ async def on_chat_start():
             ),
             Switch(id="do_apply", label="Apply changes (write to repo)", initial=False),
             Switch(id="skip_build", label="Skip build verification", initial=False),
-            Switch(id="update_profile_readme", label="Update profile README", initial=False),
             Switch(id="update_skills", label="Update skills/badges in profile", initial=False),
         ]
     ).send()
@@ -193,7 +241,7 @@ async def on_chat_start():
     llm = get_llm(None)
     cl.user_session.set("llm", llm)
     await cl.Message(
-        content="Hi. I'm AutoFolio. Paste a GitHub repo URL or describe a project, and I'll add it to your portfolio. Set **Portfolio path** in settings (gear icon), or say it in your message (e.g. \"Add this to my portfolio at ~/my-site\"). To also update your GitHub profile README, turn on **Update profile README** in settings and set **Profile README path** or URL.",
+        content="Hi. I'm AutoFolio. Paste a GitHub repo URL or describe a project, and I'll add it where you ask. Set **Portfolio path** (and optionally **Profile README path**) in settings, or say them in your message. I only update what you ask for: e.g. \"Add this to my portfolio at ~/my-site\" updates only the portfolio; add \"and my profile README\" or \"both\" to update the profile too.",
         author="AutoFolio",
     ).send()
 
@@ -283,6 +331,74 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
+    if _is_profile_only_intent(text, cleaned):
+        config_dict = cl.user_session.get("last_added_project")
+        if not config_dict:
+            await cl.Message(
+                content="To add a project and update your profile README in one go, describe the project and say \"and my profile README\" or \"both\" in the same message. If you already added a project and only want to update the profile, add the project again with \"and my profile README\" in the message.",
+                author="AutoFolio",
+            ).send()
+            return
+        config = ProjectConfig(**config_dict)
+        profile_readme_path_setting = (settings.get("profile_readme_path") or "").strip()
+        profile_readme_url_setting = (settings.get("profile_readme_url") or "").strip()
+        profile_result = _resolve_profile_repo(
+            profile_readme_url_setting or None,
+            profile_readme_path_setting or None,
+            portfolio_url or None,
+            Path("."),
+        )
+        if not profile_result:
+            await cl.Message(
+                content="Could not resolve profile README repo. Set **Profile README path** or **Profile README URL** in settings, or use a portfolio GitHub URL so I can find your profile repo.",
+                author="AutoFolio",
+            ).send()
+            return
+        profile_repo_path, profile_temp_dir, profile_is_remote = profile_result
+        priority = cl.user_session.get("last_added_project_priority") or "high"
+        update_skills = settings.get("update_skills") is True
+        try:
+            profile_patches = run_profile_step(
+                llm, config, priority, profile_repo_path, update_skills
+            )
+        except Exception:
+            profile_patches = []
+        if not profile_patches:
+            await cl.Message(
+                content=f"**{config.title}** is already in your profile README. No changes made.",
+                author="AutoFolio",
+            ).send()
+            if profile_temp_dir:
+                cleanup_temp(profile_temp_dir)
+            return
+        diff_lines = ["**Profile README**\n"]
+        for i, patch in enumerate(profile_patches):
+            try:
+                diff_text = _compute_diff(profile_repo_path, patch)
+            except Exception as e:
+                diff_text = f"(could not compute diff: {e})"
+            diff_lines.append(f"### Profile [{i + 1}] {patch.path} ({patch.action})\n\n```diff\n{diff_text}\n```")
+        diff_md = "\n\n".join(diff_lines)
+        cl.user_session.set("pending_project", config_dict)
+        cl.user_session.set("pending_patches", [])
+        cl.user_session.set("repo_path", None)
+        cl.user_session.set("temp_dir", None)
+        cl.user_session.set("pending_profile_patches", [p.model_dump() for p in profile_patches])
+        cl.user_session.set("profile_repo_path", str(profile_repo_path))
+        cl.user_session.set("profile_temp_dir", str(profile_temp_dir) if profile_temp_dir else None)
+        cl.user_session.set("profile_is_remote", profile_is_remote)
+        cl.user_session.set("profile_readme_url_setting", profile_readme_url_setting or None)
+        cl.user_session.set("profile_only_flow", True)
+        await cl.Message(
+            content="**Profile README update (no portfolio changes)**\n\n" + diff_md,
+            actions=[
+                cl.Action(name="apply_profile_only_patches", label="Apply profile changes", payload={}),
+                cl.Action(name="discard_patches", label="Discard", payload={}),
+            ],
+            author="AutoFolio",
+        ).send()
+        return
+
     url_match = GITHUB_URL_RE.search(cleaned)
     try:
         if url_match:
@@ -314,10 +430,12 @@ async def on_message(message: cl.Message):
         raise
 
     config_json = config.model_dump_json()
+    update_profile_readme = _parse_update_profile_intent(text)
     action_payload = {
         "config": json.loads(config_json),
         "portfolio_path": portfolio_path or "",
         "portfolio_url": portfolio_url or "",
+        "update_profile_readme": update_profile_readme,
     }
     actions = [
         cl.Action(name="approve_config", label="Approve", payload=action_payload),
@@ -336,6 +454,7 @@ async def on_cancel_config(action: cl.Action):
     await cl.Message(content="Cancelled.", author="AutoFolio").send()
     cl.user_session.set("pending_project", None)
     cl.user_session.set("pending_patches", None)
+    cl.user_session.set("pending_priority", None)
     cl.user_session.set("repo_path", None)
     cl.user_session.set("temp_dir", None)
     cl.user_session.set("build_commands", None)
@@ -361,6 +480,7 @@ async def on_edit_config(action: cl.Action):
         "config": payload.get("config"),
         "portfolio_path": payload.get("portfolio_path", ""),
         "portfolio_url": payload.get("portfolio_url", ""),
+        "update_profile_readme": payload.get("update_profile_readme", False),
     }
     config_dict = action_payload_base.get("config")
     if not config_dict:
@@ -380,6 +500,7 @@ async def on_edit_field(action: cl.Action):
         "config": payload.get("config"),
         "portfolio_path": payload.get("portfolio_path", ""),
         "portfolio_url": payload.get("portfolio_url", ""),
+        "update_profile_readme": payload.get("update_profile_readme", False),
     }
     config_dict = action_payload_base.get("config")
     if not config_dict:
@@ -419,6 +540,7 @@ async def on_edit_field(action: cl.Action):
         "config": config_dict,
         "portfolio_path": action_payload_base.get("portfolio_path", ""),
         "portfolio_url": action_payload_base.get("portfolio_url", ""),
+        "update_profile_readme": action_payload_base.get("update_profile_readme", False),
     }
     actions = [
         cl.Action(name="approve_config", label="Approve", payload=action_payload),
@@ -550,7 +672,7 @@ async def on_approve_config(action: cl.Action):
     profile_is_remote = False
     profile_readme_url_setting = (settings.get("profile_readme_url") or "").strip()
     profile_readme_path_setting = (settings.get("profile_readme_path") or "").strip()
-    update_profile_readme = settings.get("update_profile_readme") is not False
+    update_profile_readme = payload.get("update_profile_readme", False)
     update_skills = settings.get("update_skills") is True
     profile_patches = []
 
@@ -582,6 +704,7 @@ async def on_approve_config(action: cl.Action):
 
     cl.user_session.set("pending_project", config_dict)
     cl.user_session.set("pending_patches", [p.model_dump() for p in patches])
+    cl.user_session.set("pending_priority", result["analysis"].evaluation.portfolio_priority)
     cl.user_session.set("repo_path", str(repo_path))
     cl.user_session.set("temp_dir", str(temp_dir) if temp_dir else None)
     cl.user_session.set("build_commands", detection.build_commands or [])
@@ -614,6 +737,7 @@ async def on_discard_patches(action: cl.Action):
         cleanup_temp(Path(profile_temp_dir))
     cl.user_session.set("pending_project", None)
     cl.user_session.set("pending_patches", None)
+    cl.user_session.set("pending_priority", None)
     cl.user_session.set("repo_path", None)
     cl.user_session.set("temp_dir", None)
     cl.user_session.set("build_commands", None)
@@ -622,7 +746,64 @@ async def on_discard_patches(action: cl.Action):
     cl.user_session.set("profile_temp_dir", None)
     cl.user_session.set("profile_is_remote", None)
     cl.user_session.set("profile_readme_url_setting", None)
+    cl.user_session.set("profile_only_flow", None)
     await cl.Message(content="Discarded. No changes applied.", author="AutoFolio").send()
+
+
+@cl.action_callback("apply_profile_only_patches")
+async def on_apply_profile_only_patches(action: cl.Action):
+    profile_repo_path_str = cl.user_session.get("profile_repo_path")
+    profile_patches_dict = cl.user_session.get("pending_profile_patches") or []
+    profile_temp_dir_str = cl.user_session.get("profile_temp_dir")
+    profile_readme_url_setting = cl.user_session.get("profile_readme_url_setting")
+    config_dict = cl.user_session.get("pending_project") or {}
+    project_title = config_dict.get("title", "Project")
+
+    if not profile_repo_path_str or not profile_patches_dict:
+        await cl.Message(content="No pending profile patches to apply.", author="AutoFolio").send()
+        return
+
+    profile_repo_path = Path(profile_repo_path_str)
+    profile_patches = [PatchAction(**d) for d in profile_patches_dict]
+
+    try:
+        async with cl.Step(name="Profile README: creating branch", type="tool") as step:
+            profile_branch = await cl.make_async(create_branch)(profile_repo_path, f"profile-{project_title}")
+            step.output = profile_branch
+        async with cl.Step(name="Profile README: applying patches", type="tool") as step:
+            await cl.make_async(apply_patches)(profile_repo_path, profile_patches)
+            step.output = f"{len(profile_patches)} file(s)"
+        async with cl.Step(name="Profile README: committing and pushing", type="tool") as step:
+            await cl.make_async(commit_changes)(profile_repo_path, f"profile: {project_title}")
+            profile_remote = profile_readme_url_setting or await cl.make_async(get_github_remote_url)(profile_repo_path)
+            if profile_remote:
+                await cl.make_async(push_branch)(profile_repo_path, profile_branch)
+                await cl.make_async(create_pull_request)(
+                    profile_remote, profile_branch, f"profile: {project_title}", profile_repo_path
+                )
+                step.output = "Pushed (PR created)"
+            else:
+                step.output = "Branch created locally (no remote)"
+        await cl.Message(
+            content=f"Done. Profile README updated for **{project_title}**.",
+            author="AutoFolio",
+        ).send()
+    except Exception as e:
+        await cl.Message(
+            content=f"Error applying profile changes: {type(e).__name__}: {e}",
+            author="AutoFolio",
+        ).send()
+    finally:
+        if profile_temp_dir_str:
+            cleanup_temp(Path(profile_temp_dir_str))
+        cl.user_session.set("pending_project", None)
+        cl.user_session.set("pending_patches", None)
+        cl.user_session.set("pending_profile_patches", None)
+        cl.user_session.set("profile_repo_path", None)
+        cl.user_session.set("profile_temp_dir", None)
+        cl.user_session.set("profile_is_remote", None)
+        cl.user_session.set("profile_readme_url_setting", None)
+        cl.user_session.set("profile_only_flow", None)
 
 
 @cl.action_callback("apply_patches")
@@ -672,6 +853,7 @@ async def on_apply_patches(action: cl.Action):
                         cleanup_temp(Path(temp_dir_str))
                     cl.user_session.set("pending_project", None)
                     cl.user_session.set("pending_patches", None)
+                    cl.user_session.set("pending_priority", None)
                     cl.user_session.set("repo_path", None)
                     cl.user_session.set("temp_dir", None)
                     return
@@ -723,6 +905,9 @@ async def on_apply_patches(action: cl.Action):
         else:
             done_msg = f"Done. Project **{project_title}** has been added to your portfolio."
 
+        cl.user_session.set("last_added_project", config_dict)
+        cl.user_session.set("last_added_project_priority", cl.user_session.get("pending_priority"))
+
         await cl.Message(content=done_msg, author="AutoFolio").send()
     except Exception as e:
         await cl.Message(
@@ -737,6 +922,7 @@ async def on_apply_patches(action: cl.Action):
             cleanup_temp(Path(profile_temp_dir_str))
         cl.user_session.set("pending_project", None)
         cl.user_session.set("pending_patches", None)
+        cl.user_session.set("pending_priority", None)
         cl.user_session.set("repo_path", None)
         cl.user_session.set("temp_dir", None)
         cl.user_session.set("pending_profile_patches", None)
