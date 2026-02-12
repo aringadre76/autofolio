@@ -159,6 +159,29 @@ def _retry_log(step_name: str):
     return _log
 
 
+def _is_connection_refused(exc: BaseException) -> bool:
+    if getattr(exc, "errno", None) == 111:
+        return True
+    msg = str(exc).lower()
+    if "connection refused" in msg or "errno 111" in msg:
+        return True
+    cause = getattr(exc, "__cause__", None)
+    return cause is not None and _is_connection_refused(cause)
+
+
+def _connection_refused_hint() -> str:
+    provider = os.environ.get("AUTOFOLIO_LLM_PROVIDER", "ollama")
+    if provider == "ollama":
+        return (
+            " The LLM backend (Ollama) is not reachable. "
+            "Start Ollama (e.g. run `ollama serve`) or switch to OpenAI in Settings and set OPENAI_API_KEY."
+        )
+    return (
+        " The LLM backend could not be reached. "
+        "Check that the service is running and the URL is correct, or try another provider in Settings."
+    )
+
+
 def invoke_with_retry(invocable, messages, step_name: str = "LLM call"):
     max_retries = _get_max_retries()
 
@@ -178,9 +201,10 @@ def invoke_with_retry(invocable, messages, step_name: str = "LLM call"):
             f"[bold red]{step_name} failed after {max_retries} "
             f"attempts: {type(exc).__name__}: {exc}[/bold red]"
         )
+        hint = _connection_refused_hint() if _is_connection_refused(exc) else ""
         raise RuntimeError(
             f"{step_name} failed after {max_retries} attempts: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {exc}{hint}"
         ) from exc
 
 

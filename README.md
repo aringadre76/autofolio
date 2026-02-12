@@ -11,6 +11,11 @@ Automatically add projects to your portfolio website using LLM-powered analysis.
 5. AutoFolio generates the content and shows you a diff preview
 6. If you approve, it applies the changes, verifies the build, pushes a branch, and opens a PR
 
+## Requirements
+
+- Python 3.10+
+- For GitHub clone/push/PR: `GITHUB_TOKEN` environment variable
+
 ## Installation
 
 ```bash
@@ -108,7 +113,7 @@ Additional `add` options:
 
 ### `autofolio run`
 
-Run the pipeline from a pre-built JSON config file:
+Run the pipeline from a pre-built JSON config file. Pass `--config` multiple times for batch mode:
 
 ```bash
 autofolio run --config project.json --portfolio-path ~/my-portfolio
@@ -143,6 +148,7 @@ Both `add` and `run` accept these options:
 --profile-readme-path PATH      Local path to the profile README repo
 --no-profile                    Skip profile README update
 --update-skills                 Also update the skills/badges section if new tech is detected
+--preview / --no-preview        Interactive diff preview before applying (default: on when using --apply)
 ```
 
 ## LLM Providers
@@ -232,6 +238,7 @@ autofolio/
       app.py        - Chainlit chat UI
   .chainlit/
     config.toml     - Chainlit server and UI config
+  chainlit.md      - Welcome message for the Web UI
   public/
     theme.json      - Teal/cyan theme (light and dark)
     stylesheet.css  - Custom CSS overrides
@@ -245,7 +252,7 @@ autofolio/
     test_validator.py
   pyproject.toml
   README.md
-  MVP.md
+  MVP.md           - MVP plan and design notes
 ```
 
 ## License

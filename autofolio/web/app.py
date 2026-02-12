@@ -35,6 +35,13 @@ from autofolio.llm import (
 )
 from autofolio.patcher import apply_patches
 from autofolio.preview import _compute_diff
+from autofolio.profile import (
+    detect_duplicate,
+    discover_profile_repo,
+    extract_github_username,
+    project_already_in_portfolio,
+    run_profile_step,
+)
 from autofolio.validator import BuildError, run_build
 
 PORTFOLIO_PHRASE_RE = re.compile(
@@ -158,6 +165,18 @@ async def on_chat_start():
                 placeholder="https://github.com/user/portfolio",
                 initial="",
             ),
+            TextInput(
+                id="profile_readme_path",
+                label="Profile README path",
+                placeholder="/path/to/username-repo",
+                initial="",
+            ),
+            TextInput(
+                id="profile_readme_url",
+                label="Profile README URL (alternative to path)",
+                placeholder="https://github.com/username/username",
+                initial="",
+            ),
             Select(
                 id="provider",
                 label="LLM provider",
@@ -166,13 +185,15 @@ async def on_chat_start():
             ),
             Switch(id="do_apply", label="Apply changes (write to repo)", initial=False),
             Switch(id="skip_build", label="Skip build verification", initial=False),
+            Switch(id="update_profile_readme", label="Update profile README", initial=False),
+            Switch(id="update_skills", label="Update skills/badges in profile", initial=False),
         ]
     ).send()
     cl.user_session.set("settings", {})
     llm = get_llm(None)
     cl.user_session.set("llm", llm)
     await cl.Message(
-        content="Hi. I'm AutoFolio. Paste a GitHub repo URL or describe a project, and I'll add it to your portfolio. You can tell me where your portfolio is in the same message (e.g. \"Add https://github.com/user/project to my portfolio at ~/my-site\" or \"portfolio at ./portfolio\") or set a default in the settings (gear icon).",
+        content="Hi. I'm AutoFolio. Paste a GitHub repo URL or describe a project, and I'll add it to your portfolio. Set **Portfolio path** in settings (gear icon), or say it in your message (e.g. \"Add this to my portfolio at ~/my-site\"). To also update your GitHub profile README, turn on **Update profile README** in settings and set **Profile README path** or URL.",
         author="AutoFolio",
     ).send()
 
@@ -219,8 +240,18 @@ async def on_message(message: cl.Message):
 
     cleaned, path_from_msg, url_from_msg = _parse_portfolio_from_message(text)
     settings = cl.user_session.get("settings") or {}
-    portfolio_path = (path_from_msg or settings.get("portfolio_path") or "").strip()
-    portfolio_url = (url_from_msg or settings.get("portfolio_url") or "").strip()
+    portfolio_path = (
+        path_from_msg
+        or cl.user_session.get("portfolio_path")
+        or settings.get("portfolio_path")
+        or ""
+    ).strip()
+    portfolio_url = (
+        url_from_msg
+        or cl.user_session.get("portfolio_url")
+        or settings.get("portfolio_url")
+        or ""
+    ).strip()
     if not portfolio_path and not portfolio_url:
         await cl.Message(
             content="Where is your portfolio? Reply with a local path (e.g. `~/my-portfolio` or `./site`) or a GitHub repo URL (e.g. `https://github.com/me/me.github.io`). You can also set a default in the settings (gear icon)."
@@ -243,22 +274,44 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
-    llm = cl.user_session.get("llm") or get_llm(settings.get("provider"))
+    try:
+        llm = cl.user_session.get("llm") or get_llm(settings.get("provider"))
+    except (ValueError, EnvironmentError) as e:
+        await cl.Message(
+            content=f"LLM setup failed: {e}. Set **OPENAI_API_KEY** for OpenAI, or use Ollama (default).",
+            author="AutoFolio",
+        ).send()
+        return
 
     url_match = GITHUB_URL_RE.search(cleaned)
-    if url_match:
-        repo_url = url_match.group(0)
-        extra = cleaned.replace(repo_url, "").strip() or None
-        async with cl.Step(name="Fetching GitHub metadata", type="tool") as step:
-            meta = await cl.make_async(fetch_github_metadata)(repo_url)
-            step.output = meta.get("name") or repo_url
-        async with cl.Step(name="Cloning and extracting project metadata", type="tool") as step:
-            config = await cl.make_async(ingest_from_repo)(llm, repo_url, extra_description=extra)
-            step.output = config.title
-    else:
-        async with cl.Step(name="Extracting project metadata", type="tool") as step:
-            config = await cl.make_async(ingest_from_description)(llm, cleaned)
-            step.output = config.title
+    try:
+        if url_match:
+            repo_url = url_match.group(0)
+            extra = cleaned.replace(repo_url, "").strip() or None
+            async with cl.Step(name="Fetching GitHub metadata", type="tool") as step:
+                meta = await cl.make_async(fetch_github_metadata)(repo_url)
+                step.output = meta.get("name") or repo_url
+            async with cl.Step(name="Cloning and extracting project metadata", type="tool") as step:
+                config = await cl.make_async(ingest_from_repo)(llm, repo_url, extra_description=extra)
+                step.output = config.title
+        else:
+            async with cl.Step(name="Extracting project metadata", type="tool") as step:
+                config = await cl.make_async(ingest_from_description)(llm, cleaned)
+                step.output = config.title
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "connection refused" in err_msg or "errno 111" in err_msg or "not reachable" in err_msg:
+            await cl.Message(
+                content=(
+                    "**Project metadata extraction failed:** the LLM backend could not be reached (connection refused).\n\n"
+                    "**To fix:**\n"
+                    "- If you use **Ollama**, start it (e.g. run `ollama serve` in a terminal).\n"
+                    "- Or open **Settings** (gear icon), set **LLM provider** to **OpenAI**, and set the `OPENAI_API_KEY` environment variable where the app runs."
+                ),
+                author="AutoFolio",
+            ).send()
+            return
+        raise
 
     config_json = config.model_dump_json()
     action_payload = {
@@ -288,35 +341,54 @@ async def on_cancel_config(action: cl.Action):
     cl.user_session.set("build_commands", None)
 
 
+def _edit_field_actions(payload_base: dict) -> list:
+    config_dict = payload_base.get("config") or {}
+    return [
+        cl.Action(name="edit_field", payload={**payload_base, "field": "title"}, label="Title"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "description"}, label="Description"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "repo_url"}, label="Repo URL"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "demo_url"}, label="Demo URL"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "tech_stack"}, label="Tech stack"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "tags"}, label="Tags"),
+        cl.Action(name="edit_field", payload={**payload_base, "field": "done"}, label="Done editing"),
+    ]
+
+
 @cl.action_callback("edit_config")
 async def on_edit_config(action: cl.Action):
     payload = action.payload or {}
-    action_payload_base = payload
-    config_dict = payload.get("config")
+    action_payload_base = {
+        "config": payload.get("config"),
+        "portfolio_path": payload.get("portfolio_path", ""),
+        "portfolio_url": payload.get("portfolio_url", ""),
+    }
+    config_dict = action_payload_base.get("config")
     if not config_dict:
         await cl.Message(content="No config to edit.", author="AutoFolio").send()
         return
-    config = ProjectConfig(**config_dict)
-    res = await cl.AskActionMessage(
+    await cl.Message(
         content="Which field do you want to change?",
-        actions=[
-            cl.Action(name="edit_title", payload={"value": "title"}, label="Title"),
-            cl.Action(name="edit_description", payload={"value": "description"}, label="Description"),
-            cl.Action(name="edit_repo_url", payload={"value": "repo_url"}, label="Repo URL"),
-            cl.Action(name="edit_demo_url", payload={"value": "demo_url"}, label="Demo URL"),
-            cl.Action(name="edit_tech_stack", payload={"value": "tech_stack"}, label="Tech stack"),
-            cl.Action(name="edit_tags", payload={"value": "tags"}, label="Tags"),
-            cl.Action(name="edit_done", payload={"value": "done"}, label="Done editing"),
-        ],
+        actions=_edit_field_actions(action_payload_base),
+        author="AutoFolio",
     ).send()
-    key = (res.get("payload") or {}).get("value") if res else None
-    if not key or key == "done":
-        config_dict = config.model_dump()
-        action_payload = {
-            "config": config_dict,
-            "portfolio_path": action_payload_base.get("portfolio_path", ""),
-            "portfolio_url": action_payload_base.get("portfolio_url", ""),
-        }
+
+
+@cl.action_callback("edit_field")
+async def on_edit_field(action: cl.Action):
+    payload = action.payload or {}
+    action_payload_base = {
+        "config": payload.get("config"),
+        "portfolio_path": payload.get("portfolio_path", ""),
+        "portfolio_url": payload.get("portfolio_url", ""),
+    }
+    config_dict = action_payload_base.get("config")
+    if not config_dict:
+        await cl.Message(content="No config to edit.", author="AutoFolio").send()
+        return
+    field = payload.get("field")
+    config = ProjectConfig(**config_dict)
+    if field == "done" or not field:
+        action_payload = action_payload_base
         actions = [
             cl.Action(name="approve_config", label="Approve", payload=action_payload),
             cl.Action(name="edit_config", label="Edit again", payload=action_payload),
@@ -326,22 +398,22 @@ async def on_edit_config(action: cl.Action):
             content=_config_to_markdown(config), actions=actions, author="AutoFolio"
         ).send()
         return
-    if key == "tech_stack":
+    if field == "tech_stack":
         new_val = await cl.AskUserMessage(content="Enter tech stack (comma-separated):", timeout=60)
         if new_val and new_val.get("output"):
             config.tech_stack = [x.strip() for x in new_val["output"].split(",") if x.strip()]
-    elif key == "tags":
+    elif field == "tags":
         new_val = await cl.AskUserMessage(content="Enter tags (comma-separated):", timeout=60)
         if new_val and new_val.get("output"):
             config.tags = [x.strip() for x in new_val["output"].split(",") if x.strip()]
     else:
-        cur = getattr(config, key, "") or ""
+        cur = getattr(config, field, "") or ""
         new_val = await cl.AskUserMessage(
             content=f"Current value: `{cur}`. Enter new value (or leave empty to keep):",
             timeout=60,
         )
         if new_val and (new_val.get("output") or "").strip():
-            setattr(config, key, new_val["output"].strip())
+            setattr(config, field, new_val["output"].strip())
     config_dict = config.model_dump()
     action_payload = {
         "config": config_dict,
@@ -360,6 +432,28 @@ def _payload_portfolio(payload: dict, settings: dict) -> tuple[str, str]:
     path = (payload.get("portfolio_path") or cl.user_session.get("portfolio_path") or settings.get("portfolio_path") or "").strip()
     url = (payload.get("portfolio_url") or cl.user_session.get("portfolio_url") or settings.get("portfolio_url") or "").strip()
     return path, url
+
+
+def _resolve_profile_repo(
+    profile_readme_url: str | None,
+    profile_readme_path: str | None,
+    portfolio_url: str | None,
+    repo_path: Path,
+) -> tuple[Path, Path | None, bool] | None:
+    if profile_readme_path:
+        p = Path(profile_readme_path).expanduser().resolve()
+        if p.is_dir():
+            return p, None, False
+        return None
+    if profile_readme_url:
+        temp_dir = clone_repo(profile_readme_url)
+        return temp_dir, temp_dir, True
+    username = extract_github_username(portfolio_url, repo_path)
+    if not username or not discover_profile_repo(username):
+        return None
+    profile_url = f"https://github.com/{username}/{username}"
+    temp_dir = clone_repo(profile_url)
+    return temp_dir, temp_dir, True
 
 
 @cl.action_callback("approve_config")
@@ -398,6 +492,34 @@ async def on_approve_config(action: cl.Action):
         detection = await cl.make_async(detect_stack)(repo_path)
         step.output = detection.stack or "unknown"
 
+    if await cl.make_async(project_already_in_portfolio)(repo_path, config, detection):
+        await cl.Message(
+            content=f"**{config.title}** is already in your portfolio. No changes made.",
+            author="AutoFolio",
+        ).send()
+        if temp_dir:
+            cleanup_temp(temp_dir)
+        return
+
+    profile_readme_path_setting = (settings.get("profile_readme_path") or "").strip()
+    if profile_readme_path_setting:
+        profile_dir = Path(profile_readme_path_setting).expanduser().resolve()
+        if profile_dir.is_dir():
+            readme_path = profile_dir / "README.md"
+            if readme_path.is_file():
+                try:
+                    profile_content = readme_path.read_text(encoding="utf-8")
+                    if detect_duplicate(profile_content, config):
+                        await cl.Message(
+                            content=f"**{config.title}** is already in your profile README. No changes made.",
+                            author="AutoFolio",
+                        ).send()
+                        if temp_dir:
+                            cleanup_temp(temp_dir)
+                        return
+                except OSError:
+                    pass
+
     async with cl.Step(name="Analyzing and generating patches", type="tool") as step:
         result = await cl.make_async(_collect_for_project_sync)(
             repo_path, config, llm, detection
@@ -423,20 +545,57 @@ async def on_approve_config(action: cl.Action):
         diff_lines.append(f"### [{i + 1}] {patch.path} ({patch.action})\n\n```diff\n{diff_text}\n```")
     diff_md = "\n\n".join(diff_lines)
 
+    profile_repo_path = None
+    profile_temp_dir = None
+    profile_is_remote = False
+    profile_readme_url_setting = (settings.get("profile_readme_url") or "").strip()
+    profile_readme_path_setting = (settings.get("profile_readme_path") or "").strip()
+    update_profile_readme = settings.get("update_profile_readme") is not False
+    update_skills = settings.get("update_skills") is True
+    profile_patches = []
+
+    if update_profile_readme and (profile_readme_path_setting or profile_readme_url_setting or portfolio_url or get_github_remote_url(repo_path)):
+        profile_result = _resolve_profile_repo(
+            profile_readme_url_setting or None,
+            profile_readme_path_setting or None,
+            portfolio_url or None,
+            repo_path,
+        )
+        if profile_result:
+            profile_repo_path, profile_temp_dir, profile_is_remote = profile_result
+            priority = result["analysis"].evaluation.portfolio_priority
+            try:
+                profile_patches = run_profile_step(
+                    llm, config, priority, profile_repo_path, update_skills
+                )
+            except Exception:
+                profile_patches = []
+            if profile_patches:
+                diff_lines.append("**Profile README**\n")
+                for i, patch in enumerate(profile_patches):
+                    try:
+                        diff_text = _compute_diff(profile_repo_path, patch)
+                    except Exception as e:
+                        diff_text = f"(could not compute diff: {e})"
+                    diff_lines.append(f"### Profile [{i + 1}] {patch.path} ({patch.action})\n\n```diff\n{diff_text}\n```")
+                diff_md = "\n\n".join(diff_lines)
+
     cl.user_session.set("pending_project", config_dict)
     cl.user_session.set("pending_patches", [p.model_dump() for p in patches])
     cl.user_session.set("repo_path", str(repo_path))
     cl.user_session.set("temp_dir", str(temp_dir) if temp_dir else None)
     cl.user_session.set("build_commands", detection.build_commands or [])
     cl.user_session.set("portfolio_url", portfolio_url or None)
+    cl.user_session.set("pending_profile_patches", [p.model_dump() for p in profile_patches])
+    cl.user_session.set("profile_repo_path", str(profile_repo_path) if profile_repo_path else None)
+    cl.user_session.set("profile_temp_dir", str(profile_temp_dir) if profile_temp_dir else None)
+    cl.user_session.set("profile_is_remote", profile_is_remote)
+    cl.user_session.set("profile_readme_url_setting", profile_readme_url_setting or None)
 
-    do_apply = settings.get("do_apply") is True
-    actions = []
-    if do_apply:
-        actions.append(
-            cl.Action(name="apply_patches", label="Apply changes", payload={})
-        )
-    actions.append(cl.Action(name="discard_patches", label="Discard", payload={}))
+    actions = [
+        cl.Action(name="apply_patches", label="Apply changes", payload={}),
+        cl.Action(name="discard_patches", label="Discard", payload={}),
+    ]
 
     await cl.Message(
         content="**Patch preview**\n\n" + diff_md,
@@ -450,11 +609,19 @@ async def on_discard_patches(action: cl.Action):
     temp_dir = cl.user_session.get("temp_dir")
     if temp_dir:
         cleanup_temp(Path(temp_dir))
+    profile_temp_dir = cl.user_session.get("profile_temp_dir")
+    if profile_temp_dir:
+        cleanup_temp(Path(profile_temp_dir))
     cl.user_session.set("pending_project", None)
     cl.user_session.set("pending_patches", None)
     cl.user_session.set("repo_path", None)
     cl.user_session.set("temp_dir", None)
     cl.user_session.set("build_commands", None)
+    cl.user_session.set("pending_profile_patches", None)
+    cl.user_session.set("profile_repo_path", None)
+    cl.user_session.set("profile_temp_dir", None)
+    cl.user_session.set("profile_is_remote", None)
+    cl.user_session.set("profile_readme_url_setting", None)
     await cl.Message(content="Discarded. No changes applied.", author="AutoFolio").send()
 
 
@@ -521,10 +688,42 @@ async def on_apply_patches(action: cl.Action):
             else:
                 step.output = "Branch created locally (no remote)"
 
-        await cl.Message(
-            content=f"Done. Project **{project_title}** has been added to your portfolio.",
-            author="AutoFolio",
-        ).send()
+        profile_repo_path_str = cl.user_session.get("profile_repo_path")
+        profile_patches_dict = cl.user_session.get("pending_profile_patches") or []
+        profile_temp_dir_str = cl.user_session.get("profile_temp_dir")
+        profile_readme_url_setting = cl.user_session.get("profile_readme_url_setting")
+
+        if profile_repo_path_str and profile_patches_dict:
+            profile_repo_path = Path(profile_repo_path_str)
+            profile_patches = [PatchAction(**d) for d in profile_patches_dict]
+            profile_label = f"profile-{project_title}"
+            try:
+                async with cl.Step(name="Profile README: creating branch", type="tool") as step:
+                    profile_branch = await cl.make_async(create_branch)(profile_repo_path, profile_label)
+                    step.output = profile_branch
+                async with cl.Step(name="Profile README: applying patches", type="tool") as step:
+                    await cl.make_async(apply_patches)(profile_repo_path, profile_patches)
+                    step.output = f"{len(profile_patches)} file(s)"
+                async with cl.Step(name="Profile README: committing and pushing", type="tool") as step:
+                    await cl.make_async(commit_changes)(profile_repo_path, f"profile: {project_title}")
+                    profile_remote = profile_readme_url_setting or await cl.make_async(get_github_remote_url)(profile_repo_path)
+                    if profile_remote:
+                        await cl.make_async(push_branch)(profile_repo_path, profile_branch)
+                        await cl.make_async(create_pull_request)(
+                            profile_remote, profile_branch, f"profile: {project_title}", profile_repo_path
+                        )
+                        step.output = "Pushed (PR created)"
+                    else:
+                        step.output = "Branch created locally (no remote)"
+                done_msg = f"Done. Project **{project_title}** has been added to your portfolio and profile README."
+            except Exception as profile_err:
+                done_msg = f"Portfolio updated. Profile README update failed: {profile_err}"
+            if profile_temp_dir_str:
+                cleanup_temp(Path(profile_temp_dir_str))
+        else:
+            done_msg = f"Done. Project **{project_title}** has been added to your portfolio."
+
+        await cl.Message(content=done_msg, author="AutoFolio").send()
     except Exception as e:
         await cl.Message(
             content=f"Error applying changes: {type(e).__name__}: {e}",
@@ -533,7 +732,15 @@ async def on_apply_patches(action: cl.Action):
     finally:
         if temp_dir_str:
             cleanup_temp(Path(temp_dir_str))
+        profile_temp_dir_str = cl.user_session.get("profile_temp_dir")
+        if profile_temp_dir_str:
+            cleanup_temp(Path(profile_temp_dir_str))
         cl.user_session.set("pending_project", None)
         cl.user_session.set("pending_patches", None)
         cl.user_session.set("repo_path", None)
         cl.user_session.set("temp_dir", None)
+        cl.user_session.set("pending_profile_patches", None)
+        cl.user_session.set("profile_repo_path", None)
+        cl.user_session.set("profile_temp_dir", None)
+        cl.user_session.set("profile_is_remote", None)
+        cl.user_session.set("profile_readme_url_setting", None)

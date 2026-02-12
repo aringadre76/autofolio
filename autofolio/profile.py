@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
 from autofolio.config import PatchAction, ProfileReadmeHint, ProjectConfig
+from autofolio.detector import DetectionResult
 from autofolio.llm import invoke_with_retry
 
 console = Console()
@@ -913,18 +914,37 @@ def detect_duplicate(content: str, project: ProjectConfig) -> bool:
     title_lower = project.title.lower()
     for line in content.splitlines():
         line_lower = line.lower()
-        if title_lower in line_lower:
-            bold_patterns = [
-                f"**{title_lower}**",
-                f"[{title_lower}]",
-                f"# {title_lower}",
-                f"## {title_lower}",
-                f"### {title_lower}",
-            ]
-            if any(p in line_lower for p in bold_patterns):
-                return True
+        if title_lower not in line_lower:
+            continue
+        bold_patterns = [
+            f"**{title_lower}**",
+            f"[{title_lower}]",
+            f"# {title_lower}",
+            f"## {title_lower}",
+            f"### {title_lower}",
+        ]
+        if any(p in line_lower for p in bold_patterns):
+            return True
+        if ":" in line and '"' in line:
+            return True
 
     return False
+
+
+def project_already_in_portfolio(
+    repo_path: Path, project: ProjectConfig, detection: DetectionResult
+) -> bool:
+    pl = detection.project_listing
+    if not pl:
+        return False
+    path = repo_path / pl.file_path
+    if not path.is_file():
+        return False
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return detect_duplicate(content, project)
 
 
 def build_profile_patch(

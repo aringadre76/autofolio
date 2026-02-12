@@ -35,6 +35,7 @@ from autofolio.preview import preview_and_confirm, show_patches
 from autofolio.profile import (
     discover_profile_repo,
     extract_github_username,
+    project_already_in_portfolio,
     run_profile_step,
 )
 from autofolio.validator import BuildError, run_build
@@ -484,6 +485,12 @@ def _run_pipeline(
         else:
             console.print(f"\n[bold]Project:[/bold] {project.title}")
             console.print(f"[dim]{project.description}[/dim]")
+
+        if project_already_in_portfolio(repo_path, project, detection):
+            console.print(
+                f"[yellow]  {project.title} is already in the portfolio. Skipping.[/yellow]"
+            )
+            continue
 
         try:
             result = _collect_for_project(repo_path, project, llm, detection)
