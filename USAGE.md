@@ -1,5 +1,3 @@
-[README](README.md) | **USAGE**
-
 # AutoFolio Usage Guide
 
 This guide covers prerequisites, installation, and how to use AutoFolio from the command line and the Web UI.

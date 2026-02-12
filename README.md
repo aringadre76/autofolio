@@ -1,8 +1,6 @@
-**README** | [USAGE](USAGE.md)
-
 # AutoFolio
 
-Automatically add projects to your portfolio website using LLM-powered analysis. AutoFolio adapts to whatever portfolio structure you already have. No refactoring required. Safe, preview-first workflow.
+Automatically add projects to your portfolio website using LLM-powered analysis. AutoFolio adapts to whatever portfolio structure you already have. No refactoring required. Safe, preview-first workflow. For detailed usage, see [USAGE](USAGE.md).
 
 ## How It Works
 
